@@ -361,13 +361,15 @@ class BingCreatorImageValidator:
         :param _collection: Collection to determine for download.
         :return: Whether the collection should be added or not.
         """
+        collection_title = _collection['title'].strip() # For some reason we see trailing spaces in some collection names
         if 'collectionPage' in _collection and 'items' in _collection['collectionPage']:
             collections_to_include = self.__config['collection']['collections_to_include']
             if len(collections_to_include) == 0:
                 return True
             else:
-                return (('knownCollectionType' in _collection and 'Saved Images' in collections_to_include)
-                        or _collection['title'] in collections_to_include)
+                should_include_collection = 'knownCollectionType' in _collection and 'Saved Images' in collections_to_include or collection_title in collections_to_include
+                logging.debug("Include collection [%s]? %s", collection_title, should_include_collection)
+                return should_include_collection
         else:
             return False
 
