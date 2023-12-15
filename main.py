@@ -112,10 +112,11 @@ class BingCreatorImageDownload:
         :return: None
         """
         logging.info(f"Starting download of {len(self.__image_data)} images.")
-        with zipfile.ZipFile(f"bing_images_{date.today()}.zip", "w") as zip_file:
+        semaphore = asyncio.Semaphore(10)
+        with zipfile.ZipFile(f"bing_images_{datetime.now().replace(microsecond=0).isoformat()}.zip", "w") as zip_file:
             async with aiofiles.tempfile.TemporaryDirectory('wb') as temp_dir:
                 tasks = [
-                    self.__download_and_save_image(image_dict, temp_dir)
+                    self.__download_and_save_image(image_dict, temp_dir, semaphore)
                     for image_dict
                     in self.__image_data
                 ]
@@ -132,67 +133,69 @@ class BingCreatorImageDownload:
     async def __download_and_save_image(
             self,
             image_dict: dict,
-            temp_dir: aiofiles.tempfile.TemporaryDirectory) -> tuple:
+            temp_dir: aiofiles.tempfile.TemporaryDirectory,
+            semaphore: asyncio.Semaphore) -> tuple:
         """
         Downloads an image using the image link in the supplied dictionary.
         :param image_dict: Dictionary containing link, prompt collection name and thumbnail link of an image.
         :param temp_dir: The directory to save files to before zipping.
         :return: The filename and collection name of the downloaded file.
         """
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with BingCreatorNetworkUtility.create_retry_client(session).get(
-                        image_dict['image_link']) as response:
-                    logging.info(f"Downloading image from: {image_dict['image_link']}")
-                    if response.status == 200:
-                        filename_image_prompt = await BingCreatorImageUtility.slugify(image_dict['image_prompt'])
-                        file_name_substitute_dict = {
-                            'date': image_dict['creation_date'],
-                            'index': image_dict['index'],
-                            'prompt': filename_image_prompt[:50],
-                            'sep': '_'
-                        }
-                        template = string.Template(self.__config['filename']['filename_pattern'])
-                        file_name_formatted = template.safe_substitute(file_name_substitute_dict)
-                        filename = f"{temp_dir}{os.sep}{file_name_formatted}.jpg"
+        async with semaphore:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with BingCreatorNetworkUtility.create_retry_client(session).get(
+                            image_dict['image_link']) as response:
+                        logging.info(f"Downloading image from: {image_dict['image_link']}")
+                        if response.status == 200:
+                            filename_image_prompt = await BingCreatorImageUtility.slugify(image_dict['image_prompt'])
+                            file_name_substitute_dict = {
+                                'date': image_dict['creation_date'],
+                                'index': image_dict['index'],
+                                'prompt': filename_image_prompt[:50],
+                                'sep': '_'
+                            }
+                            template = string.Template(self.__config['filename']['filename_pattern'])
+                            file_name_formatted = template.safe_substitute(file_name_substitute_dict)
+                            filename = f"{temp_dir}{os.sep}{file_name_formatted}.jpg"
 
-                        async with aiofiles.open(filename, "wb") as f:
-                            await f.write(await response.read())
+                            async with aiofiles.open(filename, "wb") as f:
+                                await f.write(await response.read())
 
-                        await BingCreatorImageUtility.add_exif_metadata(image_dict, filename)
+                            await BingCreatorImageUtility.add_exif_metadata(image_dict, filename)
 
-                        return filename, image_dict['collection_name']
-                    else:
-                        logging.warning(f"Failed to download {image_dict['image_link']} "
-                                        f"for Reason: {response.status}: {response.reason}-> "
-                                        f"Retrying with thumbnail {image_dict['thumbnail_link']}")
-                        async with BingCreatorNetworkUtility.create_retry_client(session).get(
-                                image_dict['thumbnail_link']) as thumbnail_response:
-                            if thumbnail_response.status == 200:
-                                filename_image_prompt = await BingCreatorImageUtility.slugify(
-                                    image_dict['image_prompt']
-                                )
-                                file_name_substitute_dict = {
-                                    'date': image_dict['creation_date'],
-                                    'index': image_dict['index'],
-                                    'prompt': filename_image_prompt[:50],
-                                    'sep': '_'
-                                }
-                                template = string.Template(self.__config['filename']['filename_pattern'])
-                                file_name_formatted = template.safe_substitute(file_name_substitute_dict)
-                                filename = f"{temp_dir}{os.sep}{file_name_formatted}_T.jpg"
+                            return filename, image_dict['collection_name']
+                        else:
+                            logging.warning(f"Failed to download {image_dict['image_link']} "
+                                            f"for Reason: {response.status}: {response.reason}-> "
+                                            f"Retrying with thumbnail {image_dict['thumbnail_link']}")
+                            async with BingCreatorNetworkUtility.create_retry_client(session).get(
+                                    image_dict['thumbnail_link']) as thumbnail_response:
+                                if thumbnail_response.status == 200:
+                                    filename_image_prompt = await BingCreatorImageUtility.slugify(
+                                        image_dict['image_prompt']
+                                    )
+                                    file_name_substitute_dict = {
+                                        'date': image_dict['creation_date'],
+                                        'index': image_dict['index'],
+                                        'prompt': filename_image_prompt[:50],
+                                        'sep': '_'
+                                    }
+                                    template = string.Template(self.__config['filename']['filename_pattern'])
+                                    file_name_formatted = template.safe_substitute(file_name_substitute_dict)
+                                    filename = f"{temp_dir}{os.sep}{file_name_formatted}_T.jpg"
 
-                                async with aiofiles.open(filename, "wb") as f:
-                                    await f.write(await thumbnail_response.read())
+                                    async with aiofiles.open(filename, "wb") as f:
+                                        await f.write(await thumbnail_response.read())
 
-                                await BingCreatorImageUtility.add_exif_metadata(image_dict, filename)
+                                    await BingCreatorImageUtility.add_exif_metadata(image_dict, filename)
 
-                                return filename, image_dict['collection_name']
-                            else:
-                                logging.warning(f"Failed to download {image_dict['thumbnail_link']} "
-                                                f"for Reason: {thumbnail_response.status}: {thumbnail_response.reason}")
-        except Exception as e:
-            logging.exception(e)
+                                    return filename, image_dict['collection_name']
+                                else:
+                                    logging.warning(f"Failed to download {image_dict['thumbnail_link']} "
+                                                    f"for Reason: {thumbnail_response.status}: {thumbnail_response.reason}")
+            except Exception as e:
+                logging.exception(e)
 
     async def __set_creation_dates(self) -> None:
         """
