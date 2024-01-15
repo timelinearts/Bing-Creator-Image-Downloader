@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import base64
 import io
@@ -10,7 +11,7 @@ import sys
 import time
 import tomllib
 import zipfile
-from datetime import date
+from datetime import date, datetime
 from datetime import timezone
 from urllib.parse import unquote
 
@@ -29,7 +30,6 @@ from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
-
 class BingCreatorImageDownload:
     """
     This class is used to download all images from the supplied collections.
@@ -41,15 +41,43 @@ class BingCreatorImageDownload:
         self.__config = BingCreatorImageConfig().config
         self.__validator = BingCreatorImageValidator(self.__config)
 
+
     async def run(self):
         """
         High level method that serves as the entry point.
         :return: None
         """
-        self.__image_data = self.__gather_image_data()
-        self.image_count = len(self.__image_data)
+        self._get_image_data()
         await self.__set_creation_dates()
         await self.__download_and_zip_images()
+
+    def _get_image_data(self):
+        self.__image_data = self.__gather_image_data()
+        self.image_count = len(self.__image_data)
+
+    def _get_collection_data(self):
+        """
+        Retrieve the collection data
+        :return: The parsed dictionary response from Bing Image Creator
+        """
+        header = {
+            "Content-Type": "application/json",
+            "cookie": os.getenv('COOKIE'),
+            "sid": "0"
+        }
+        body = {
+            "collectionItemType": "all",
+            "maxItemsToFetch": 10000,
+            "shouldFetchMetadata": True
+        }
+        response = BingCreatorNetworkUtility.create_session().post(
+            url='https://www.bing.com/mysaves/collections/get?sid=0',
+            headers=header,
+            data=json.dumps(body)
+        )
+        if response.status_code == 200:
+            collection_dict = response.json()
+            return collection_dict
 
     def __gather_image_data(self) -> list:
         """
@@ -78,16 +106,18 @@ class BingCreatorImageDownload:
                 raise Exception('No collections were found for the given cookie.')
             gathered_image_data = []
             for collection in collection_dict['collections']:
+                collection_name = collection['title']
+                logging.info("collection: [%s]", collection_name)
                 if self.__validator.should_add_collection_to_images(collection):
-                    with open('collection_dict_dump_debug.json', 'w') as f:
-                        f.write(json.dumps(collection))
+                    with open(f'collection_dict_dump_debug-{collection_name}.json', 'w') as f:
+                        f.write(json.dumps(collection, indent=2))
                     for index, item in enumerate(collection['collectionPage']['items']):
                         if self.__validator.should_add_item_to_images(item):
                             custom_data = json.loads(item['content']['customData'])
                             image_page_url = custom_data['PageUrl']
                             image_link = custom_data['MediaUrl']
                             image_prompt = custom_data['ToolTip']
-                            collection_name = collection['title']
+                            collection_name = collection_name
                             thumbnail_raw = item['content']['thumbnails'][0]['thumbnailUrl']
                             thumbnail_link = re.match('^[^&]+', thumbnail_raw).group(0)
                             pattern = r'Image \d of \d$'
@@ -360,6 +390,7 @@ class BingCreatorImageValidator:
     """
     def __init__(self, config: dict):
         self.__config = config
+        logging.info("collections to include: %s", self.__config['collection']['collections_to_include'])
 
     def should_add_collection_to_images(self, _collection: dict) -> bool:
         """
@@ -416,7 +447,7 @@ class BingCreatorCollectionImport:
         logging.info("Creating thumbnails...")
         item_list = await self.__construct_item_list()
         logging.info(f"Adding {len(item_list)} items to the collection...")
-        semaphore = asyncio.Semaphore(10)
+        semaphore = asyncio.Semaphore(2)
         tasks = [self.add_image_to_collection(item, semaphore) for item in item_list]
         await asyncio.gather(*tasks)
 
@@ -441,6 +472,7 @@ class BingCreatorCollectionImport:
                 }
             }
             async with (aiohttp.ClientSession() as session):
+                logging.INFO("download ENTER: %s", item)
                 retry_client = BingCreatorNetworkUtility.create_retry_client(session)
                 retry_client.retry_options.evaluate_response_callback = \
                     BingCreatorNetworkUtility.should_retry_add_collection
@@ -455,9 +487,13 @@ class BingCreatorCollectionImport:
                     except requests.JSONDecodeError:
                         raise Exception(f"The request to add the item to the collection was unsuccessful:"
                                         f"{response.status}")
+                    finally:
+                        logging.INFO("download EXIT: %s", item)
+
                     if response.status != 200 or not response_json['isSuccess']:
                         raise Exception(f"Adding item to collection failed with following response:"
                                         f"{response_json} for item:{item['ClickThroughUrl']}")
+
 
     async def __construct_item_list(self) -> list[dict]:
         """
@@ -538,11 +574,30 @@ async def main() -> None:
     logging.info(f"Finished downloading {bing_creator_image_download.image_count} images in"
                  f" {round(elapsed, 2)} seconds.")
 
+def run_downloader(args):
+    asyncio.run(main())
+
+def dump_collection_list(args):
+    bing_creator_image_download = BingCreatorImageDownload()
+    collections = bing_creator_image_download._get_collection_data()
+    print(json.dumps(collections, indent=2))
+
+def get_args():
+    parser = argparse.ArgumentParser()
+    actions_subparsers = parser.add_subparsers(title="actions", help="Actions")
+    downloader_subparser = actions_subparsers.add_parser("download", help="download selected collections")
+    downloader_subparser.set_defaults(func=run_downloader)
+    collections_parser = actions_subparsers.add_parser("collections", help="collections info")
+    collections_parser.set_defaults(func=dump_collection_list)
+    args = parser.parse_args()
+    return args
 
 if __name__ == "__main__":
+    args = get_args()
     load_dotenv()
     logging.basicConfig(
         format='%(asctime)s %(levelname)s %(message)s',
         level=logging.INFO,
-        stream=sys.stdout)
-    asyncio.run(main())
+        #stream=sys.stdout
+        )
+    args.func(args)
